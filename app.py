@@ -397,6 +397,132 @@ def make_docx(title, strategy_md):
 
 
 # ──────────────────────────────────────────────
+# STRATEGY PARSER & STRUCTURED RENDERER
+# ──────────────────────────────────────────────
+
+def parse_strategy(md: str) -> dict:
+    """Split the raw markdown response into named sections."""
+    sections = {
+        "product_summary": "",
+        "brand_lens": "",
+        "static_concepts": [],
+        "video_concepts": [],
+        "priority_matrix": "",
+        "creative_reference_map": "",
+        "raw": md,
+    }
+
+    # Split on H1 headings (# HEADING)
+    h1_pattern = re.compile(r"^# (.+)$", re.MULTILINE)
+    h1_splits = h1_pattern.split(md)
+
+    # h1_splits = [preamble, heading1, body1, heading2, body2, ...]
+    current_key = None
+    for i, part in enumerate(h1_splits):
+        if i == 0:
+            continue  # preamble before first heading
+        if i % 2 == 1:
+            # This is a heading name
+            heading = part.strip().upper()
+            if "PRODUCT SUMMARY" in heading:
+                current_key = "product_summary"
+            elif "BRAND LENS" in heading:
+                current_key = "brand_lens"
+            elif "STATIC" in heading and "CONCEPT" in heading:
+                current_key = "static_concepts_raw"
+            elif "VIDEO" in heading and "CONCEPT" in heading:
+                current_key = "video_concepts_raw"
+            elif "PRIORITY" in heading:
+                current_key = "priority_matrix"
+            elif "REFERENCE" in heading:
+                current_key = "creative_reference_map"
+            else:
+                current_key = None
+        else:
+            # This is body content
+            body = part.strip()
+            if current_key in ("product_summary", "brand_lens", "priority_matrix", "creative_reference_map"):
+                sections[current_key] = body
+            elif current_key == "static_concepts_raw":
+                # Split individual concepts on ## STATIC N:
+                concepts = re.split(r"(?=^## STATIC \d+)", body, flags=re.MULTILINE)
+                sections["static_concepts"] = [c.strip() for c in concepts if c.strip()]
+            elif current_key == "video_concepts_raw":
+                concepts = re.split(r"(?=^## VIDEO \d+)", body, flags=re.MULTILINE)
+                sections["video_concepts"] = [c.strip() for c in concepts if c.strip()]
+
+    return sections
+
+
+def _extract_concept_title(concept_md: str) -> str:
+    """Pull the concept title from a ## heading."""
+    m = re.match(r"^##\s+(?:STATIC|VIDEO)\s+\d+:\s*[\"']?(.+?)[\"']?\s*$", concept_md, re.MULTILINE)
+    return m.group(1).strip('"\'') if m else "Concept"
+
+
+def render_strategy(sections: dict):
+    """Render parsed strategy in structured tabs with styled cards."""
+
+    tab_overview, tab_static, tab_video, tab_priority = st.tabs([
+        "Overview",
+        f"Static Concepts ({len(sections['static_concepts'])})",
+        f"Video Concepts ({len(sections['video_concepts'])})",
+        "Priority & References",
+    ])
+
+    # ── Overview Tab ───────────────────────────
+    with tab_overview:
+        if sections["product_summary"]:
+            st.markdown("### Product Summary")
+            st.markdown(sections["product_summary"])
+        if sections["brand_lens"]:
+            st.markdown("---")
+            st.markdown("### Brand Lens Applied")
+            st.markdown(sections["brand_lens"])
+
+    # ── Static Concepts Tab ────────────────────
+    with tab_static:
+        if not sections["static_concepts"]:
+            st.info("No static concepts found in the response.")
+        for i, concept in enumerate(sections["static_concepts"]):
+            title = _extract_concept_title(concept)
+            # Remove the ## heading line from the body
+            body = re.sub(r"^##.+\n?", "", concept, count=1).strip()
+            st.markdown(
+                f'<div class="concept-card"><strong>{i+1}. {title}</strong></div>',
+                unsafe_allow_html=True,
+            )
+            with st.expander(f"View full concept — {title}", expanded=(i < 3)):
+                st.markdown(body)
+
+    # ── Video Concepts Tab ─────────────────────
+    with tab_video:
+        if not sections["video_concepts"]:
+            st.info("No video concepts found in the response.")
+        for i, concept in enumerate(sections["video_concepts"]):
+            title = _extract_concept_title(concept)
+            body = re.sub(r"^##.+\n?", "", concept, count=1).strip()
+            st.markdown(
+                f'<div class="concept-card video"><strong>{i+1}. {title}</strong></div>',
+                unsafe_allow_html=True,
+            )
+            with st.expander(f"View full concept — {title}", expanded=(i < 2)):
+                st.markdown(body)
+
+    # ── Priority & References Tab ──────────────
+    with tab_priority:
+        if sections["priority_matrix"]:
+            st.markdown("### Priority Matrix")
+            st.markdown(sections["priority_matrix"])
+        if sections["creative_reference_map"]:
+            st.markdown("---")
+            st.markdown("### Creative Reference Map")
+            st.markdown(sections["creative_reference_map"])
+        if not sections["priority_matrix"] and not sections["creative_reference_map"]:
+            st.info("No priority data found in the response.")
+
+
+# ──────────────────────────────────────────────
 # SESSION STATE DEFAULTS
 # ──────────────────────────────────────────────
 for key, default in {
@@ -560,10 +686,12 @@ if go:
             ):
                 full += chunk
                 response_box.markdown(full + " **|**")
-            response_box.markdown(full)
         except Exception as e:
             st.error(f"API error: {e}")
             st.stop()
+
+    # Replace streaming box with structured view
+    response_box.empty()
 
     # Save to session
     st.session_state["strategy"] = full
@@ -578,6 +706,14 @@ if go:
     )
 
     st.success("Creative strategy generated!")
+
+    # Render structured output
+    sections = parse_strategy(full)
+    render_strategy(sections)
+
+    # Raw markdown toggle
+    if st.toggle("View raw markdown", value=False, key="raw_toggle_gen"):
+        st.markdown(full)
 
     # ── Actions row ────────────────────────────
     st.markdown("---")
@@ -635,7 +771,14 @@ elif st.session_state["strategy"]:
 
     st.markdown("---")
     st.caption(f"Showing last generated strategy for **{summ['title']}**")
-    st.markdown(full)
+
+    # Structured view
+    sections = parse_strategy(full)
+    render_strategy(sections)
+
+    # Raw toggle
+    if st.toggle("View raw markdown", value=False, key="raw_toggle_last"):
+        st.markdown(full)
 
     st.markdown("---")
     a1, a2, _ = st.columns(3)
