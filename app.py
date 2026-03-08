@@ -405,8 +405,8 @@ def make_docx(title, strategy_md):
 # IMAGE GENERATION (Together AI — Flux Schnell)
 # ──────────────────────────────────────────────
 
-def generate_single_image(prompt: str, api_key: str, width: int = 1024, height: int = 1024) -> str | None:
-    """Generate one image via Together AI. Returns base64 string or None on failure."""
+def generate_single_image(prompt: str, api_key: str, width: int = 1024, height: int = 1024) -> tuple[str | None, str | None]:
+    """Generate one image via Together AI. Returns (base64_string, error_message)."""
     try:
         client = Together(api_key=api_key)
         resp = client.images.generate(
@@ -416,36 +416,46 @@ def generate_single_image(prompt: str, api_key: str, width: int = 1024, height: 
             height=height,
             steps=4,
             n=1,
+            response_format="b64_json",
         )
         if resp.data and resp.data[0].b64_json:
-            return resp.data[0].b64_json
+            return resp.data[0].b64_json, None
+        # Fallback: if URL is returned instead, download it
+        if resp.data and hasattr(resp.data[0], "url") and resp.data[0].url:
+            img_resp = requests.get(resp.data[0].url, timeout=30)
+            if img_resp.status_code == 200:
+                return base64.b64encode(img_resp.content).decode(), None
+        return None, "No image data in response"
     except Exception as e:
-        st.warning(f"Image gen failed: {e}")
-    return None
+        return None, str(e)
 
 
-def generate_images_batch(prompts: list[str], api_key: str, width: int = 1024, height: int = 1024, progress_callback=None) -> list[str | None]:
-    """Generate multiple images in parallel. Returns list of base64 strings (None for failures)."""
+def generate_images_batch(prompts: list[str], api_key: str, width: int = 1024, height: int = 1024, progress_callback=None) -> tuple[list[str | None], list[str]]:
+    """Generate multiple images in parallel. Returns (list_of_base64, list_of_errors)."""
     results = [None] * len(prompts)
+    errors = []
 
     def _gen(idx_prompt):
         idx, prompt = idx_prompt
-        return idx, generate_single_image(prompt, api_key, width, height)
+        img, err = generate_single_image(prompt, api_key, width, height)
+        return idx, img, err
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         futures = {executor.submit(_gen, (i, p)): i for i, p in enumerate(prompts)}
         done_count = 0
         for future in concurrent.futures.as_completed(futures):
             try:
-                idx, img = future.result()
+                idx, img, err = future.result()
                 results[idx] = img
-            except Exception:
-                pass
+                if err:
+                    errors.append(f"Image {idx+1}: {err}")
+            except Exception as e:
+                errors.append(f"Thread error: {e}")
             done_count += 1
             if progress_callback:
                 progress_callback(done_count, len(prompts))
 
-    return results
+    return results, errors
 
 
 def extract_image_prompts(sections: dict) -> tuple[list[str], list[list[str]]]:
@@ -862,12 +872,13 @@ if go:
                     all_prompts.append(fp)
 
         if all_prompts:
+            st.info(f"Found {len(all_prompts)} image prompts. Generating visuals...")
             progress_bar = st.progress(0, text=f"Generating {len(all_prompts)} visuals...")
 
             def _update_progress(done, total):
                 progress_bar.progress(done / total, text=f"Generating visuals... {done}/{total}")
 
-            raw_images = generate_images_batch(all_prompts, together_key, progress_callback=_update_progress)
+            raw_images, gen_errors = generate_images_batch(all_prompts, together_key, progress_callback=_update_progress)
             progress_bar.empty()
 
             # Map results back
@@ -884,7 +895,18 @@ if go:
                     video_imgs[ci][fi] = raw_images[i]
 
             img_count = sum(1 for r in raw_images if r)
-            st.success(f"Generated {img_count}/{len(all_prompts)} visuals!")
+            if img_count > 0:
+                st.success(f"Generated {img_count}/{len(all_prompts)} visuals!")
+            else:
+                st.error("No visuals generated.")
+            if gen_errors:
+                with st.expander(f"⚠️ {len(gen_errors)} image generation issues"):
+                    for e in gen_errors:
+                        st.caption(e)
+        else:
+            st.warning("No image prompts found in the strategy output. Claude may not have included the image_prompt fields.")
+    elif visuals_on and not together_key:
+        st.warning("Enable visuals is on but no Together AI key entered.")
 
     # Save images to session state
     st.session_state["static_images"] = static_imgs
