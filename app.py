@@ -11,11 +11,14 @@ import requests
 import json
 import re
 import smtplib
+import base64
+import concurrent.futures
 from datetime import datetime
 from io import BytesIO
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from anthropic import Anthropic
+from together import Together
 
 # ──────────────────────────────────────────────
 # PAGE CONFIG
@@ -244,6 +247,7 @@ Each concept MUST include these fields in a markdown table:
 | ad_format | single / carousel / story |
 | creative_reasoning | Why this works for THIS product |
 | reference_brand | Real D2C brand that inspired the pattern |
+| image_prompt | A detailed text-to-image prompt (50-80 words) describing the hero visual for this ad. Include: subject, composition, lighting, color palette, mood, camera angle, style (e.g. studio product shot, lifestyle, flat lay). Do NOT include any text/words in the image description — images should be text-free. |
 
 **STEP 4 — GENERATE 5 VIDEO AD CONCEPTS**
 Each concept MUST include:
@@ -256,6 +260,7 @@ Each concept MUST include:
 | script_notes | Key voiceover / super lines |
 | performance_signals | When to use this ad (funnel stage, audience) |
 | reference_brand | Real brand that inspired this |
+| storyboard_prompts | Exactly 3 text-to-image prompts (one per key frame) for a visual storyboard. Each prompt is 40-60 words describing one scene. Format as: FRAME 1: prompt /// FRAME 2: prompt /// FRAME 3: prompt. No text/words in images. |
 
 **STEP 5 — PRIORITIZE**
 • Rank all 15 concepts by expected ROAS potential.
@@ -397,6 +402,86 @@ def make_docx(title, strategy_md):
 
 
 # ──────────────────────────────────────────────
+# IMAGE GENERATION (Together AI — Flux Schnell)
+# ──────────────────────────────────────────────
+
+def generate_single_image(prompt: str, api_key: str, width: int = 1024, height: int = 1024) -> str | None:
+    """Generate one image via Together AI. Returns base64 string or None on failure."""
+    try:
+        client = Together(api_key=api_key)
+        resp = client.images.generate(
+            model="black-forest-labs/FLUX.1-schnell",
+            prompt=prompt,
+            width=width,
+            height=height,
+            steps=4,
+            n=1,
+        )
+        if resp.data and resp.data[0].b64_json:
+            return resp.data[0].b64_json
+    except Exception as e:
+        st.warning(f"Image gen failed: {e}")
+    return None
+
+
+def generate_images_batch(prompts: list[str], api_key: str, width: int = 1024, height: int = 1024, progress_callback=None) -> list[str | None]:
+    """Generate multiple images in parallel. Returns list of base64 strings (None for failures)."""
+    results = [None] * len(prompts)
+
+    def _gen(idx_prompt):
+        idx, prompt = idx_prompt
+        return idx, generate_single_image(prompt, api_key, width, height)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(_gen, (i, p)): i for i, p in enumerate(prompts)}
+        done_count = 0
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                idx, img = future.result()
+                results[idx] = img
+            except Exception:
+                pass
+            done_count += 1
+            if progress_callback:
+                progress_callback(done_count, len(prompts))
+
+    return results
+
+
+def extract_image_prompts(sections: dict) -> tuple[list[str], list[list[str]]]:
+    """Extract image_prompt from static concepts and storyboard_prompts from video concepts.
+    Returns (static_prompts: list[str], video_prompts: list[list[str]])."""
+    static_prompts = []
+    for concept in sections.get("static_concepts", []):
+        # Look for image_prompt in markdown table: | image_prompt | <the prompt> |
+        m = re.search(r"\|\s*image_prompt\s*\|\s*(.+?)\s*\|", concept, re.IGNORECASE)
+        if m:
+            static_prompts.append(m.group(1).strip())
+        else:
+            static_prompts.append("")
+
+    video_prompts = []
+    for concept in sections.get("video_concepts", []):
+        # Look for storyboard_prompts in markdown table
+        m = re.search(r"\|\s*storyboard_prompts?\s*\|\s*(.+?)\s*\|", concept, re.IGNORECASE)
+        if m:
+            raw = m.group(1).strip()
+            # Split on "///" or "FRAME N:" patterns
+            frames = re.split(r"\s*///\s*", raw)
+            # Clean up FRAME N: prefix
+            cleaned = []
+            for f in frames:
+                f = re.sub(r"^FRAME\s+\d+:\s*", "", f.strip(), flags=re.IGNORECASE)
+                if f:
+                    cleaned.append(f)
+            video_prompts.append(cleaned[:3])  # max 3 frames
+        else:
+            video_prompts.append([])
+
+    return static_prompts, video_prompts
+
+
+# ──────────────────────────────────────────────
 # STRATEGY PARSER & STRUCTURED RENDERER
 # ──────────────────────────────────────────────
 
@@ -460,8 +545,8 @@ def _extract_concept_title(concept_md: str) -> str:
     return m.group(1).strip('"\'') if m else "Concept"
 
 
-def render_strategy(sections: dict):
-    """Render parsed strategy in structured tabs with styled cards."""
+def render_strategy(sections: dict, static_images: list | None = None, video_images: list | None = None):
+    """Render parsed strategy in structured tabs with styled cards and optional AI-generated visuals."""
 
     tab_overview, tab_static, tab_video, tab_priority = st.tabs([
         "Overview",
@@ -488,12 +573,27 @@ def render_strategy(sections: dict):
             title = _extract_concept_title(concept)
             # Remove the ## heading line from the body
             body = re.sub(r"^##.+\n?", "", concept, count=1).strip()
+
             st.markdown(
                 f'<div class="concept-card"><strong>{i+1}. {title}</strong></div>',
                 unsafe_allow_html=True,
             )
-            with st.expander(f"View full concept — {title}", expanded=(i < 3)):
-                st.markdown(body)
+
+            # Show generated image if available
+            if static_images and i < len(static_images) and static_images[i]:
+                img_col, text_col = st.columns([1, 1.5])
+                with img_col:
+                    st.image(
+                        base64.b64decode(static_images[i]),
+                        caption=f"AI-generated visual — Concept {i+1}",
+                        use_container_width=True,
+                    )
+                with text_col:
+                    with st.expander(f"View full concept — {title}", expanded=(i < 3)):
+                        st.markdown(body)
+            else:
+                with st.expander(f"View full concept — {title}", expanded=(i < 3)):
+                    st.markdown(body)
 
     # ── Video Concepts Tab ─────────────────────
     with tab_video:
@@ -502,10 +602,27 @@ def render_strategy(sections: dict):
         for i, concept in enumerate(sections["video_concepts"]):
             title = _extract_concept_title(concept)
             body = re.sub(r"^##.+\n?", "", concept, count=1).strip()
+
             st.markdown(
                 f'<div class="concept-card video"><strong>{i+1}. {title}</strong></div>',
                 unsafe_allow_html=True,
             )
+
+            # Show storyboard frames if available
+            if video_images and i < len(video_images) and video_images[i]:
+                frames = video_images[i]
+                if frames:
+                    st.markdown("**Storyboard**")
+                    frame_cols = st.columns(len(frames))
+                    for fi, frame_b64 in enumerate(frames):
+                        if frame_b64:
+                            with frame_cols[fi]:
+                                st.image(
+                                    base64.b64decode(frame_b64),
+                                    caption=f"Frame {fi+1}",
+                                    use_container_width=True,
+                                )
+
             with st.expander(f"View full concept — {title}", expanded=(i < 2)):
                 st.markdown(body)
 
@@ -529,6 +646,8 @@ for key, default in {
     "strategy": None,
     "product_summary": None,
     "product_raw": None,
+    "static_images": None,
+    "video_images": None,
     "history": [],
 }.items():
     if key not in st.session_state:
@@ -561,6 +680,18 @@ with st.sidebar:
         ],
         help="Sonnet → best quality / cost. Haiku → fastest.",
     )
+
+    st.divider()
+    st.markdown("### Visual Generation")
+    visuals_on = st.toggle("Enable AI visuals", help="Generate images for each ad concept (~$0.08 extra per strategy)")
+    together_key = ""
+    if visuals_on:
+        together_key = st.text_input(
+            "Together AI Key",
+            type="password",
+            placeholder="tok-...",
+            help="[Get a free key](https://api.together.ai/)",
+        )
 
     st.divider()
     st.markdown("### Email Delivery")
@@ -707,9 +838,60 @@ if go:
 
     st.success("Creative strategy generated!")
 
-    # Render structured output
+    # Parse and optionally generate visuals
     sections = parse_strategy(full)
-    render_strategy(sections)
+    static_imgs = None
+    video_imgs = None
+
+    if visuals_on and together_key:
+        static_prompts, video_prompt_lists = extract_image_prompts(sections)
+
+        # Gather all prompts for batch generation
+        all_prompts = []
+        prompt_map = []  # ("static", idx) or ("video", concept_idx, frame_idx)
+
+        for idx, sp in enumerate(static_prompts):
+            if sp:
+                prompt_map.append(("static", idx))
+                all_prompts.append(sp)
+
+        for ci, frames in enumerate(video_prompt_lists):
+            for fi, fp in enumerate(frames):
+                if fp:
+                    prompt_map.append(("video", ci, fi))
+                    all_prompts.append(fp)
+
+        if all_prompts:
+            progress_bar = st.progress(0, text=f"Generating {len(all_prompts)} visuals...")
+
+            def _update_progress(done, total):
+                progress_bar.progress(done / total, text=f"Generating visuals... {done}/{total}")
+
+            raw_images = generate_images_batch(all_prompts, together_key, progress_callback=_update_progress)
+            progress_bar.empty()
+
+            # Map results back
+            static_imgs = [None] * len(static_prompts)
+            video_imgs = [[] for _ in video_prompt_lists]
+
+            for i, mapping in enumerate(prompt_map):
+                if mapping[0] == "static":
+                    static_imgs[mapping[1]] = raw_images[i]
+                elif mapping[0] == "video":
+                    ci, fi = mapping[1], mapping[2]
+                    while len(video_imgs[ci]) <= fi:
+                        video_imgs[ci].append(None)
+                    video_imgs[ci][fi] = raw_images[i]
+
+            img_count = sum(1 for r in raw_images if r)
+            st.success(f"Generated {img_count}/{len(all_prompts)} visuals!")
+
+    # Save images to session state
+    st.session_state["static_images"] = static_imgs
+    st.session_state["video_images"] = video_imgs
+
+    # Render structured output with visuals
+    render_strategy(sections, static_images=static_imgs, video_images=video_imgs)
 
     # Raw markdown toggle
     if st.toggle("View raw markdown", value=False, key="raw_toggle_gen"):
@@ -772,9 +954,13 @@ elif st.session_state["strategy"]:
     st.markdown("---")
     st.caption(f"Showing last generated strategy for **{summ['title']}**")
 
-    # Structured view
+    # Structured view with cached images
     sections = parse_strategy(full)
-    render_strategy(sections)
+    render_strategy(
+        sections,
+        static_images=st.session_state.get("static_images"),
+        video_images=st.session_state.get("video_images"),
+    )
 
     # Raw toggle
     if st.toggle("View raw markdown", value=False, key="raw_toggle_last"):
@@ -845,6 +1031,8 @@ else:
         """
 - 10 static ad concepts (hook, visual, copy, format, reasoning)
 - 5 video ad concepts (scene-by-scene breakdown, scripts)
+- AI-generated hero visuals for each static concept
+- 3-frame storyboards for each video concept
 - Priority matrix with top 3 must-produce picks
 - Every concept aligned to Neeman's brand guidelines
 - Download as `.md` or `.docx`, or send via email
