@@ -402,22 +402,55 @@ def make_docx(title, strategy_md):
 
 
 # ──────────────────────────────────────────────
-# IMAGE GENERATION (Together AI — Flux Schnell)
+# IMAGE GENERATION (Together AI)
 # ──────────────────────────────────────────────
 
-def generate_single_image(prompt: str, api_key: str, width: int = 1024, height: int = 1024) -> tuple[str | None, str | None]:
+# Model configs
+VISUAL_MODELS = {
+    "quick": {
+        "model": "black-forest-labs/FLUX.1-schnell",
+        "steps": 4,
+        "label": "Flux Schnell",
+        "supports_image_ref": False,
+    },
+    "shoe_plus": {
+        "model": "black-forest-labs/FLUX.1-kontext-dev",
+        "steps": 28,
+        "label": "Flux Kontext",
+        "supports_image_ref": True,
+    },
+}
+
+
+def generate_single_image(
+    prompt: str,
+    api_key: str,
+    mode: str = "quick",
+    width: int = 1024,
+    height: int = 1024,
+    ref_image_url: str | None = None,
+) -> tuple[str | None, str | None]:
     """Generate one image via Together AI. Returns (base64_string, error_message)."""
     try:
+        cfg = VISUAL_MODELS.get(mode, VISUAL_MODELS["quick"])
         client = Together(api_key=api_key)
-        resp = client.images.generate(
-            model="black-forest-labs/FLUX.1-schnell",
+
+        kwargs = dict(
+            model=cfg["model"],
             prompt=prompt,
             width=width,
             height=height,
-            steps=4,
+            steps=cfg["steps"],
             n=1,
             response_format="b64_json",
         )
+
+        # Kontext: pass the product shoe as reference image
+        if cfg["supports_image_ref"] and ref_image_url:
+            kwargs["image_url"] = ref_image_url
+
+        resp = client.images.generate(**kwargs)
+
         if resp.data and resp.data[0].b64_json:
             return resp.data[0].b64_json, None
         # Fallback: if URL is returned instead, download it
@@ -430,17 +463,27 @@ def generate_single_image(prompt: str, api_key: str, width: int = 1024, height: 
         return None, str(e)
 
 
-def generate_images_batch(prompts: list[str], api_key: str, width: int = 1024, height: int = 1024, progress_callback=None) -> tuple[list[str | None], list[str]]:
+def generate_images_batch(
+    prompts: list[str],
+    api_key: str,
+    mode: str = "quick",
+    width: int = 1024,
+    height: int = 1024,
+    ref_image_url: str | None = None,
+    progress_callback=None,
+) -> tuple[list[str | None], list[str]]:
     """Generate multiple images in parallel. Returns (list_of_base64, list_of_errors)."""
     results = [None] * len(prompts)
     errors = []
 
     def _gen(idx_prompt):
         idx, prompt = idx_prompt
-        img, err = generate_single_image(prompt, api_key, width, height)
+        img, err = generate_single_image(prompt, api_key, mode, width, height, ref_image_url)
         return idx, img, err
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    # Use fewer workers for Kontext (heavier model)
+    max_w = 3 if mode == "shoe_plus" else 5
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_w) as executor:
         futures = {executor.submit(_gen, (i, p)): i for i, p in enumerate(prompts)}
         done_count = 0
         for future in concurrent.futures.as_completed(futures):
@@ -693,7 +736,18 @@ with st.sidebar:
 
     st.divider()
     st.markdown("### Visual Generation")
-    visuals_on = st.toggle("Enable AI visuals", help="Generate images for each ad concept (~$0.08 extra per strategy)")
+    visual_mode = st.radio(
+        "Visual mode",
+        options=["off", "quick", "shoe_plus"],
+        format_func=lambda x: {
+            "off": "No visuals (free)",
+            "quick": "Quick visuals — Flux Schnell (~$0.08)",
+            "shoe_plus": "Shoe+ Scenes — Flux Kontext (~$0.65)",
+        }[x],
+        index=0,
+        help="Quick = generic AI visuals. Shoe+ = uses actual product shoe in each scene.",
+    )
+    visuals_on = visual_mode != "off"
     together_key = ""
     if visuals_on:
         together_key = st.text_input(
@@ -856,6 +910,22 @@ if go:
     if visuals_on and together_key:
         static_prompts, video_prompt_lists = extract_image_prompts(sections)
 
+        # For Shoe+ mode: get the product image URL and adapt prompts
+        ref_image_url = None
+        if visual_mode == "shoe_plus" and summ["images"]:
+            ref_image_url = summ["images"][0]
+            # Adapt prompts to work as image-editing instructions
+            static_prompts = [
+                f"Place this shoe in the following scene: {p}" if p else ""
+                for p in static_prompts
+            ]
+            video_prompt_lists = [
+                [f"Place this shoe in the following scene: {fp}" if fp else "" for fp in frames]
+                for frames in video_prompt_lists
+            ]
+
+        mode_label = VISUAL_MODELS[visual_mode]["label"]
+
         # Gather all prompts for batch generation
         all_prompts = []
         prompt_map = []  # ("static", idx) or ("video", concept_idx, frame_idx)
@@ -872,13 +942,19 @@ if go:
                     all_prompts.append(fp)
 
         if all_prompts:
-            st.info(f"Found {len(all_prompts)} image prompts. Generating visuals...")
-            progress_bar = st.progress(0, text=f"Generating {len(all_prompts)} visuals...")
+            st.info(f"Found {len(all_prompts)} image prompts. Generating with **{mode_label}**...")
+            progress_bar = st.progress(0, text=f"Generating {len(all_prompts)} visuals ({mode_label})...")
 
             def _update_progress(done, total):
-                progress_bar.progress(done / total, text=f"Generating visuals... {done}/{total}")
+                progress_bar.progress(done / total, text=f"Generating visuals ({mode_label})... {done}/{total}")
 
-            raw_images, gen_errors = generate_images_batch(all_prompts, together_key, progress_callback=_update_progress)
+            raw_images, gen_errors = generate_images_batch(
+                all_prompts,
+                together_key,
+                mode=visual_mode,
+                ref_image_url=ref_image_url,
+                progress_callback=_update_progress,
+            )
             progress_bar.empty()
 
             # Map results back
@@ -896,7 +972,7 @@ if go:
 
             img_count = sum(1 for r in raw_images if r)
             if img_count > 0:
-                st.success(f"Generated {img_count}/{len(all_prompts)} visuals!")
+                st.success(f"Generated {img_count}/{len(all_prompts)} visuals with {mode_label}!")
             else:
                 st.error("No visuals generated.")
             if gen_errors:
