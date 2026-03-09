@@ -124,6 +124,18 @@ section[data-testid="stSidebar"] {
 section[data-testid="stSidebar"] .stMarkdown { color: #F3F2EE; }
 section[data-testid="stSidebar"] h3 { color: #EDD8C3; font-family: 'Inter', sans-serif; }
 section[data-testid="stSidebar"] label { color: #F3F2EE !important; }
+section[data-testid="stSidebar"] p,
+section[data-testid="stSidebar"] span,
+section[data-testid="stSidebar"] div[role="radiogroup"] label,
+section[data-testid="stSidebar"] div[role="radiogroup"] label p,
+section[data-testid="stSidebar"] div[role="radiogroup"] label span,
+section[data-testid="stSidebar"] .stRadio label,
+section[data-testid="stSidebar"] .stRadio p,
+section[data-testid="stSidebar"] .stRadio span,
+section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
+section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+    color: #F3F2EE !important;
+}
 
 /* Hide Streamlit branding */
 #MainMenu { visibility: hidden; }
@@ -736,17 +748,18 @@ with st.sidebar:
 
     st.divider()
     st.markdown("### Visual Generation")
-    visual_mode = st.radio(
+    _visual_labels = {
+        "No visuals (free)": "off",
+        "Quick — Flux Schnell (~$0.08)": "quick",
+        "Shoe+ Scenes — Kontext (~$0.65)": "shoe_plus",
+    }
+    visual_choice = st.selectbox(
         "Visual mode",
-        options=["off", "quick", "shoe_plus"],
-        format_func=lambda x: {
-            "off": "No visuals (free)",
-            "quick": "Quick visuals — Flux Schnell (~$0.08)",
-            "shoe_plus": "Shoe+ Scenes — Flux Kontext (~$0.65)",
-        }[x],
+        options=list(_visual_labels.keys()),
         index=0,
         help="Quick = generic AI visuals. Shoe+ = uses actual product shoe in each scene.",
     )
+    visual_mode = _visual_labels[visual_choice]
     visuals_on = visual_mode != "off"
     together_key = ""
     if visuals_on:
