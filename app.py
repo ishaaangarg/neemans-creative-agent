@@ -444,9 +444,9 @@ VISUAL_MODELS = {
         "supports_image_ref": False,
     },
     "shoe_plus": {
-        "model": "black-forest-labs/FLUX.1-kontext-dev",
+        "model": "black-forest-labs/FLUX.1-kontext-pro",
         "steps": 28,
-        "label": "Flux Kontext",
+        "label": "Flux Kontext Pro",
         "supports_image_ref": True,
     },
 }
@@ -769,7 +769,7 @@ with st.sidebar:
     _visual_labels = {
         "No visuals (free)": "off",
         "Quick — Flux Schnell (~$0.08)": "quick",
-        "Shoe+ Scenes — Kontext (~$0.65)": "shoe_plus",
+        "Shoe+ Scenes — Kontext (~$1.05)": "shoe_plus",
     }
     visual_choice = st.selectbox(
         "Visual mode",
