@@ -191,9 +191,14 @@ def product_summary(p: dict) -> dict:
         if isinstance(p.get("tags"), str)
         else p.get("tags", [])
     )
-    sizes = sorted(
+    _sort_key = lambda s: float(s) if s.replace(".", "").isdigit() else 0
+    sizes_available = sorted(
         {v.get("option1", "") for v in variants if v.get("available")},
-        key=lambda s: float(s) if s.replace(".", "").isdigit() else 0,
+        key=_sort_key,
+    )
+    sizes_sold_out = sorted(
+        {v.get("option1", "") for v in variants if not v.get("available")},
+        key=_sort_key,
     )
     return {
         "title": p.get("title", ""),
@@ -202,7 +207,8 @@ def product_summary(p: dict) -> dict:
         "compare": f"\u20b9{min(compare):,.0f}" if compare else None,
         "tags": tags,
         "images": [i["src"] for i in p.get("images", [])[:6]],
-        "sizes": sizes,
+        "sizes": sizes_available,
+        "sizes_sold_out": sizes_sold_out,
         "body": re.sub(r"<[^>]+>", " ", p.get("body_html", "")),
         "handle": p.get("handle", ""),
         "published": p.get("published_at", "")[:10],
@@ -308,6 +314,18 @@ def build_user_prompt(product: dict, url: str) -> str:
     body = re.sub(r"<[^>]+>", " ", product.get("body_html", ""))
     body = re.sub(r"\s+", " ", body).strip()[:2500]
 
+    # Build clear availability summary
+    _sort_key = lambda s: float(s) if s.replace(".", "").isdigit() else 0
+    available_sizes = sorted(
+        {v.get("option1", "") for v in variants if v.get("available")},
+        key=_sort_key,
+    )
+    sold_out_sizes = sorted(
+        {v.get("option1", "") for v in variants if not v.get("available")},
+        key=_sort_key,
+    )
+    total_sizes = len(available_sizes) + len(sold_out_sizes)
+
     lines = [
         "Generate a complete Creative Strategy for this Neeman's product:\n",
         f"**Product:** {product.get('title', '')}",
@@ -322,13 +340,13 @@ def build_user_prompt(product: dict, url: str) -> str:
     lines += [
         f"**Tags:** {tags}",
         f"**Published:** {product.get('published_at', 'N/A')[:10]}",
-        f"\n**Variants ({len(variants)}):**",
+        f"\n**Stock Status:** THIS PRODUCT IS IN STOCK AND ACTIVELY SELLING.",
+        f"**Available sizes ({len(available_sizes)}/{total_sizes}):** {', '.join(available_sizes)}",
     ]
-    for v in variants[:6]:
-        lines.append(
-            f"  - {v.get('title','')}: \u20b9{v.get('price','')} "
-            f"(available={v.get('available',False)})"
-        )
+    if sold_out_sizes:
+        lines.append(f"**Sold out sizes:** {', '.join(sold_out_sizes)}")
+    else:
+        lines.append("**Sold out sizes:** None — all sizes available")
     lines += [
         f"\n**Product Description:**\n{body}",
         f"\n**Product URL:** {url}",
@@ -872,7 +890,11 @@ if go:
 
             mcol1, mcol2, mcol3 = st.columns(3)
             mcol1.metric("Type", summ["type"] or "—")
-            mcol2.metric("Sizes", f"{len(summ['sizes'])} available")
+            sold_out_count = len(summ.get("sizes_sold_out", []))
+            size_label = f"{len(summ['sizes'])} available"
+            if sold_out_count:
+                size_label += f", {sold_out_count} sold out"
+            mcol2.metric("Sizes", size_label)
             mcol3.metric("Published", summ["published"] or "—")
 
             tags_html = " ".join(
