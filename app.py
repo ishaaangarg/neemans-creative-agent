@@ -192,14 +192,14 @@ def product_summary(p: dict) -> dict:
         else p.get("tags", [])
     )
     _sort_key = lambda s: float(s) if s.replace(".", "").isdigit() else 0
+    # A size is available if ANY variant with that size is in stock
     sizes_available = sorted(
         {v.get("option1", "") for v in variants if v.get("available")},
         key=_sort_key,
     )
-    sizes_sold_out = sorted(
-        {v.get("option1", "") for v in variants if not v.get("available")},
-        key=_sort_key,
-    )
+    # A size is sold out ONLY if ALL variants for that size are unavailable
+    all_sizes = {v.get("option1", "") for v in variants}
+    sizes_sold_out = sorted(all_sizes - set(sizes_available), key=_sort_key)
     return {
         "title": p.get("title", ""),
         "type": p.get("product_type", ""),
@@ -315,16 +315,16 @@ def build_user_prompt(product: dict, url: str) -> str:
     body = re.sub(r"\s+", " ", body).strip()[:2500]
 
     # Build clear availability summary
+    # A size is available if ANY variant with that size is in stock.
+    # A size is sold out ONLY if ALL variants for that size are unavailable.
     _sort_key = lambda s: float(s) if s.replace(".", "").isdigit() else 0
     available_sizes = sorted(
         {v.get("option1", "") for v in variants if v.get("available")},
         key=_sort_key,
     )
-    sold_out_sizes = sorted(
-        {v.get("option1", "") for v in variants if not v.get("available")},
-        key=_sort_key,
-    )
-    total_sizes = len(available_sizes) + len(sold_out_sizes)
+    all_sizes = {v.get("option1", "") for v in variants}
+    sold_out_sizes = sorted(all_sizes - set(available_sizes), key=_sort_key)
+    total_sizes = len(all_sizes)
 
     lines = [
         "Generate a complete Creative Strategy for this Neeman's product:\n",
@@ -340,13 +340,14 @@ def build_user_prompt(product: dict, url: str) -> str:
     lines += [
         f"**Tags:** {tags}",
         f"**Published:** {product.get('published_at', 'N/A')[:10]}",
-        f"\n**Stock Status:** THIS PRODUCT IS IN STOCK AND ACTIVELY SELLING.",
+        f"\n**IMPORTANT — STOCK STATUS:** This product is LIVE, IN STOCK, and actively selling on neemans.com.",
+        f"**The product is generally available in most sizes.** Only a size marked below as sold out is actually unavailable — everything else is in stock and ready to ship.",
         f"**Available sizes ({len(available_sizes)}/{total_sizes}):** {', '.join(available_sizes)}",
     ]
     if sold_out_sizes:
-        lines.append(f"**Sold out sizes:** {', '.join(sold_out_sizes)}")
+        lines.append(f"**Sold out sizes (only these):** {', '.join(sold_out_sizes)}")
     else:
-        lines.append("**Sold out sizes:** None — all sizes available")
+        lines.append("**Sold out sizes:** None — every single size is available")
     lines += [
         f"\n**Product Description:**\n{body}",
         f"\n**Product URL:** {url}",
